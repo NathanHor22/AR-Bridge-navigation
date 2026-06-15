@@ -32,19 +32,36 @@
     const video = document.getElementById('video');
     const msg   = document.getElementById('msg');
 
-    navigator.mediaDevices
-      .getUserMedia({ video: { facingMode: { ideal: 'environment' } } })
-      .then(stream => {
-        video.srcObject = stream;
-        video.onloadedmetadata = () => {
-          video.play();
-          msg.textContent = '✓ Camera OK';
-          setTimeout(() => { msg.style.display = 'none'; }, 2000);
-        };
-      })
-      .catch(err => {
-        msg.innerHTML = `<strong>${err.name}</strong><br>${err.message}`;
-      });
+    function show(html) { msg.innerHTML = html; }
+
+    // Diagnostics — visible immediately so we can see exactly what context we're in
+    const proto = location.protocol;
+    const hasMediaDevices = !!navigator.mediaDevices;
+    const hasGetUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    show(
+      `Protocol: ${proto}<br>` +
+      `mediaDevices: ${hasMediaDevices}<br>` +
+      `getUserMedia: ${hasGetUserMedia}<br>` +
+      `Requesting camera…`
+    );
+
+    if (!hasGetUserMedia) {
+      show(`getUserMedia not available<br>Protocol: ${proto}<br>mediaDevices: ${hasMediaDevices}`);
+    } else {
+      navigator.mediaDevices
+        .getUserMedia({ video: { facingMode: { ideal: 'environment' } } })
+        .then(stream => {
+          video.srcObject = stream;
+          video.onloadedmetadata = () => {
+            video.play();
+            show('✓ Camera OK');
+            setTimeout(() => { msg.style.display = 'none'; }, 2000);
+          };
+        })
+        .catch(err => {
+          show(`<strong>${err.name}</strong><br>${err.message}<br>Protocol: ${proto}`);
+        });
+    }
   </script>
 </body>
 </html>
