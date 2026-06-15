@@ -3,222 +3,77 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <title>AR Bridge</title>
+  <title>AR Bridge – MindAR Test</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { overflow: hidden; background: #000; }
-
-    #ar-container { width: 100vw; height: 100vh; position: relative; }
-
-    #touch-overlay {
+    #ar-container { width: 100vw; height: 100vh; }
+    #status {
       position: fixed;
-      inset: 0;
-      z-index: 100;
-      pointer-events: none;
-      touch-action: none;
-      -webkit-user-select: none;
-      user-select: none;
-      cursor: grab;
-    }
-    #touch-overlay.active { pointer-events: auto; }
-    #touch-overlay:active { cursor: grabbing; }
-
-    .pill {
-      position: fixed;
+      top: 20px;
       left: 50%;
       transform: translateX(-50%);
       color: #fff;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-size: 14px;
-      font-weight: 500;
-      background: rgba(0, 0, 0, 0.52);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      padding: 8px 20px;
-      border-radius: 24px;
-      z-index: 200;
+      font-family: -apple-system, sans-serif;
+      font-size: 15px;
+      background: rgba(0,0,0,0.7);
+      padding: 10px 20px;
+      border-radius: 20px;
+      z-index: 9999;
       white-space: nowrap;
-      pointer-events: none;
-      transition: opacity 0.45s ease;
     }
-
-    #status { top: 28px; }
-    #hint   { bottom: 56px; opacity: 0; }
   </style>
 </head>
 <body>
   <div id="ar-container"></div>
-  <div id="touch-overlay"></div>
-  <div id="status" class="pill">Starting…</div>
-  <div id="hint"   class="pill">Drag to rotate</div>
+  <div id="status">Loading MindAR script…</div>
 
-  <!--
-    Load order matters:
-    1. MindAR  → sets window.THREE (r147) + window.MINDAR
-    2. GLTFLoader / DRACOLoader from three@0.137 examples/js
-       (last Three.js version that shipped the legacy UMD loader scripts)
-       These attach themselves onto window.THREE automatically.
-  -->
-  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.137.0/examples/js/loaders/GLTFLoader.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.137.0/examples/js/loaders/DRACOLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+          onload="document.getElementById('status').textContent='MindAR script loaded'"
+          onerror="document.getElementById('status').textContent='FAILED to load MindAR script'">
+  </script>
 
   <script>
+    const s = document.getElementById('status');
+
     (async function () {
+      s.textContent = 'Step 1 – checking window.THREE…';
       const THREE = window.THREE;
+      if (!THREE) { s.textContent = 'ERROR: window.THREE is undefined'; return; }
+      s.textContent = 'Step 2 – THREE OK, checking MINDAR…';
+
+      if (!window.MINDAR || !window.MINDAR.IMAGE) {
+        s.textContent = 'ERROR: window.MINDAR.IMAGE is undefined'; return;
+      }
+      s.textContent = 'Step 3 – MINDAR OK, creating MindARThree…';
+
       const { MindARThree } = window.MINDAR.IMAGE;
-
-      const container = document.getElementById('ar-container');
-      const overlay   = document.getElementById('touch-overlay');
-      const statusEl  = document.getElementById('status');
-      const hintEl    = document.getElementById('hint');
-
-      // ── MindAR ────────────────────────────────────────────────────────────
       const mindarThree = new MindARThree({
-        container,
+        container: document.getElementById('ar-container'),
         imageTargetSrc: './targets.mind',
       });
       const { renderer, scene, camera } = mindarThree;
+      s.textContent = 'Step 4 – MindARThree created, adding cube…';
 
-      // ── Lighting ──────────────────────────────────────────────────────────
-      scene.add(new THREE.AmbientLight(0xffffff, 0.75));
-      const sun = new THREE.DirectionalLight(0xfff4d6, 1.4);
-      sun.position.set(2, 5, 3);
-      scene.add(sun);
-      const fill = new THREE.DirectionalLight(0xd6e8ff, 0.4);
-      fill.position.set(-3, 0, -2);
-      scene.add(fill);
-
-      // ── Rotation state ────────────────────────────────────────────────────
-      const userQuat       = new THREE.Quaternion();
-      let   autoAngle      = 0;
-      let   autoActive     = true;
-      let   resumeTimer    = null;
-      const AUTO_SPEED       = 0.5;
-      const RESUME_DELAY_MS  = 2000;
-      const DRAG_SENSITIVITY = 0.004;
-      const _dragAxis  = new THREE.Vector3();
-      const _dragDelta = new THREE.Quaternion();
-      const _autoQ     = new THREE.Quaternion();
-      const _Y         = new THREE.Vector3(0, 1, 0);
-
-      // ── Touch trackball ───────────────────────────────────────────────────
-      let dragging = false;
-      let prevX = 0, prevY = 0;
-
-      overlay.addEventListener('pointerdown', (e) => {
-        overlay.setPointerCapture(e.pointerId);
-        dragging = true;
-        prevX = e.clientX;
-        prevY = e.clientY;
-        autoActive = false;
-        clearTimeout(resumeTimer);
-        hintEl.style.opacity = '0';
-        e.preventDefault();
-      });
-
-      overlay.addEventListener('pointermove', (e) => {
-        if (!dragging) return;
-        const dx = e.clientX - prevX;
-        const dy = e.clientY - prevY;
-        prevX = e.clientX;
-        prevY = e.clientY;
-        const mag = Math.hypot(dx, dy);
-        if (mag < 0.5) return;
-        _dragAxis.set(-dy / mag, dx / mag, 0);
-        _dragDelta.setFromAxisAngle(_dragAxis, mag * DRAG_SENSITIVITY);
-        userQuat.premultiply(_dragDelta);
-        e.preventDefault();
-      });
-
-      const endDrag = () => {
-        if (!dragging) return;
-        dragging = false;
-        resumeTimer = setTimeout(() => { autoActive = true; }, RESUME_DELAY_MS);
-      };
-      overlay.addEventListener('pointerup',     endDrag);
-      overlay.addEventListener('pointercancel', endDrag);
-
-      // ── Anchor ────────────────────────────────────────────────────────────
-      const anchor = mindarThree.addAnchor(0);
-      let hintShown = false;
-      let model = null;
-
-      anchor.onTargetFound = () => {
-        statusEl.style.opacity = '0';
-        overlay.classList.add('active');
-        if (model && !hintShown) {
-          hintShown = true;
-          hintEl.style.opacity = '1';
-          setTimeout(() => { hintEl.style.opacity = '0'; }, 2800);
-        }
-      };
-
-      anchor.onTargetLost = () => {
-        statusEl.textContent = 'Point camera at image…';
-        statusEl.style.opacity = '1';
-        overlay.classList.remove('active');
-      };
-
-      // ── Animation loop ────────────────────────────────────────────────────
-      const clock = new THREE.Clock();
-
-      renderer.setAnimationLoop(() => {
-        const dt = clock.getDelta();
-        if (autoActive && model) autoAngle += AUTO_SPEED * dt;
-        if (model) {
-          _autoQ.setFromAxisAngle(_Y, autoAngle);
-          model.quaternion.copy(_autoQ).multiply(userQuat);
-        }
-        renderer.render(scene, camera);
-      });
-
-      // ── GLTF + DRACO loaders ──────────────────────────────────────────────
-      const dracoLoader = new THREE.DRACOLoader();
-      dracoLoader.setDecoderPath(
-        'https://cdn.jsdelivr.net/npm/three@0.137.0/examples/js/libs/draco/gltf/'
+      // Minimal scene: red cube on the image target
+      scene.add(new THREE.AmbientLight(0xffffff, 1));
+      const cube = new THREE.Mesh(
+        new THREE.BoxGeometry(0.1, 0.1, 0.1),
+        new THREE.MeshBasicMaterial({ color: 0xff0000 })
       );
-      const gltfLoader = new THREE.GLTFLoader();
-      gltfLoader.setDRACOLoader(dracoLoader);
+      const anchor = mindarThree.addAnchor(0);
+      anchor.group.add(cube);
+      anchor.onTargetFound = () => { s.textContent = '✓ Image detected!'; };
+      anchor.onTargetLost  = () => { s.textContent = 'Point camera at image…'; };
 
-      // ── Start camera + load GLB in parallel ───────────────────────────────
-      const [, gltf] = await Promise.all([
-        mindarThree.start(),
-        new Promise((resolve, reject) =>
-          gltfLoader.load('./highway_bridge_chinese_style.glb', resolve, undefined, reject)
-        ),
-      ]);
+      renderer.setAnimationLoop(() => renderer.render(scene, camera));
 
-      statusEl.textContent = 'Point camera at image…';
-
-      // ── Fit and attach model ──────────────────────────────────────────────
-      model = gltf.scene;
-      {
-        const box    = new THREE.Box3().setFromObject(model);
-        const size   = new THREE.Vector3();
-        const center = new THREE.Vector3();
-        box.getSize(size);
-        box.getCenter(center);
-        const scale = 0.7 / Math.max(size.x, size.y, size.z);
-        model.scale.setScalar(scale);
-        model.position.set(
-          -center.x * scale,
-          -center.y * scale + 0.18,
-          -center.z * scale,
-        );
-      }
-      anchor.group.add(model);
-
-      if (!hintShown && overlay.classList.contains('active')) {
-        hintShown = true;
-        hintEl.style.opacity = '1';
-        setTimeout(() => { hintEl.style.opacity = '0'; }, 2800);
-      }
+      s.textContent = 'Step 5 – calling mindarThree.start()…';
+      await mindarThree.start();
+      s.textContent = 'Point camera at image…';
 
     })().catch((err) => {
-      const statusEl = document.getElementById('status');
-      statusEl.textContent = 'Error: ' + err.message;
-      statusEl.style.opacity = '1';
+      s.textContent = 'ERROR: ' + err.message;
     });
   </script>
 </body>
