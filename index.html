@@ -163,6 +163,7 @@
       let hintShown = false;
       let model = null;       // the loaded GLB scene (carries the static tilt)
       let pivot = null;       // parent we spin/drag; null until the GLB loads
+      let carTick = null;     // per-frame car updater; null until cars are built
 
       anchor.onTargetFound = () => {
         statusEl.style.opacity = '0';
@@ -189,6 +190,7 @@
           _autoQ.setFromAxisAngle(_SPIN_AXIS, autoAngle);
           pivot.quaternion.copy(_autoQ).multiply(userQuat);
         }
+        if (carTick) carTick(dt);
         renderer.render(scene, camera);
       });
 
@@ -200,15 +202,22 @@
       const gltfLoader = new GLTFLoader();
       gltfLoader.setDRACOLoader(dracoLoader);
 
-      // ── Start camera + load GLB in parallel ───────────────────────────────--
-      const [, gltf] = await Promise.all([
+      const loadGLB = (url) => new Promise((resolve, reject) =>
+        gltfLoader.load(url, resolve, undefined, reject)
+      );
+
+      // ── Start camera + load both GLBs in parallel ─────────────────────────--
+      const [, gltf, carsGltf] = await Promise.all([
         mindarThree.start(),
-        new Promise((resolve, reject) =>
-          gltfLoader.load('./bridge_venetian.glb', resolve, undefined, reject)
-        ),
+        loadGLB('./bridge_venetian.glb'),
+        loadGLB('./low-poly_cars.glb'),
       ]);
 
       statusEl.textContent = 'Point camera at image…';
+
+      // Bridge's raw local bounds (filled in below) — used to place cars
+      const bridgeMin = new THREE.Vector3();
+      const bridgeMax = new THREE.Vector3();
 
       // ── Fit, tilt, and attach model ───────────────────────────────────────--
       model = gltf.scene;
@@ -216,6 +225,8 @@
         // 1) Scale to ~70% of the image-target width
         const box0 = new THREE.Box3().setFromObject(model);
         const size = box0.getSize(new THREE.Vector3());
+        bridgeMin.copy(box0.min);            // raw local bounds, before scale/tilt
+        bridgeMax.copy(box0.max);
         const scale = 0.7 / Math.max(size.x, size.y, size.z);
         model.scale.setScalar(scale);
 
@@ -239,6 +250,79 @@
       pivot = new THREE.Group();
       pivot.add(model);
       anchor.group.add(pivot);
+
+      // ── Moving cars ───────────────────────────────────────────────────────--
+      // Cars are children of `model`, so they inherit the bridge's scale, tilt,
+      // and spin — they ride the bridge and stay anchored to it.
+      //
+      // The bridge runs along its local X axis. Cars sit at a fixed deck height
+      // (Y) and lane (Z), and loop along X. All values are in the bridge's raw
+      // local units — tune them against the live AR view.
+      const spanX = bridgeMax.x - bridgeMin.x;   // bridge length (~657)
+      const widthZ = bridgeMax.z - bridgeMin.z;  // bridge width  (~295)
+
+      // ↓↓↓ TUNABLES — adjust while watching it on-device ↓↓↓
+      const CAR_LEN_FRAC = 0.06;   // car length as a fraction of bridge span
+      const CAR_DECK_Y   = 205;    // height of the road surface (local Y, 0..230)
+      const CAR_LANE_Z   = widthZ * 0.12;  // lane offset from centre (±)
+      const CAR_SPEED    = 0.12;   // laps per second (fraction of span / sec)
+      const CAR_MARGIN   = 0.06;   // skip this fraction at each end (off-bridge)
+      // Each entry = one car instance: lane (Z), direction, start progress 0..1
+      const CAR_LAYOUT = [
+        { lane:  CAR_LANE_Z, dir: +1, p: 0.00 },
+        { lane:  CAR_LANE_Z, dir: +1, p: 0.55 },
+        { lane: -CAR_LANE_Z, dir: -1, p: 0.30 },
+        { lane: -CAR_LANE_Z, dir: -1, p: 0.80 },
+      ];
+      // ↑↑↑ TUNABLES ↑↑↑
+
+      const movingCars = [];
+      {
+        const carSrc = carsGltf.scene;
+
+        // Normalise the pack: centre it, drop its base to y=0, and find its
+        // forward length (the car's longest axis is its local Z).
+        const cbox  = new THREE.Box3().setFromObject(carSrc);
+        const csize = cbox.getSize(new THREE.Vector3());
+        const ccen  = cbox.getCenter(new THREE.Vector3());
+        const carScale = (spanX * CAR_LEN_FRAC) / csize.z;
+
+        for (const cfg of CAR_LAYOUT) {
+          const car = carSrc.clone(true);
+
+          // Recentre the clone on its own origin, base at y=0
+          car.position.set(-ccen.x, -cbox.min.y, -ccen.z);
+
+          // Wrap so we can scale/rotate/translate cleanly in bridge-local space
+          const wrap = new THREE.Group();
+          wrap.add(car);
+          wrap.scale.setScalar(carScale);
+
+          // Car forward is +Z; rotate about Y so it faces along ±X
+          wrap.rotation.y = cfg.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+
+          model.add(wrap);
+          movingCars.push({ wrap, dir: cfg.dir, p: cfg.p, lane: cfg.lane });
+        }
+      }
+
+      // Advance one car's loop position and write its transform
+      const usableSpan = spanX * (1 - 2 * CAR_MARGIN);
+      const startX     = bridgeMin.x + spanX * CAR_MARGIN;
+      function updateCars(dt) {
+        for (const c of movingCars) {
+          c.p += CAR_SPEED * dt;
+          if (c.p > 1) c.p -= 1;
+          const along = c.dir > 0 ? c.p : (1 - c.p);   // travel direction
+          c.wrap.position.set(
+            startX + along * usableSpan,   // X — along the bridge
+            CAR_DECK_Y,                    // Y — deck height
+            c.lane,                        // Z — lane
+          );
+        }
+      }
+      updateCars(0);        // place cars at their starting positions
+      carTick = updateCars; // start animating them every frame
 
       // If target was already found while the GLB was still loading, show hint now
       if (!hintShown && overlay.classList.contains('active')) {
