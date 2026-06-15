@@ -94,7 +94,7 @@
 
       // ── Rotation state ──────────────────────────────────────────────────────
       const userQuat    = new THREE.Quaternion();  // cumulative drag rotation
-      let   autoAngle   = 0;                        // world-Y spin accumulator
+      let   autoAngle   = 0;                        // turntable spin accumulator
       let   autoActive  = true;
       let   resumeTimer = null;
 
@@ -102,10 +102,18 @@
       const RESUME_DELAY_MS  = 2000;   // rest before auto-spin resumes
       const DRAG_SENSITIVITY = 0.004;  // pointer px → radians
 
+      // Tip the model upright: rotate +90° about X so the model's own up-axis (Y)
+      // points OUT of the card surface. The card then acts as the floor.
+      // Flip the sign to -Math.PI/2 if the model ends up facing the wrong way.
+      const BASE_TILT_X = Math.PI / 2;
+
+      // Auto-spin around the card's normal (Z) → turntable on the card floor,
+      // instead of the in-plane vertical (which would tumble an upright model).
+      const _SPIN_AXIS = new THREE.Vector3(0, 0, 1);
+
       const _dragAxis  = new THREE.Vector3();
       const _dragDelta = new THREE.Quaternion();
       const _autoQ     = new THREE.Quaternion();
-      const _Y         = new THREE.Vector3(0, 1, 0);
 
       // ── Touch trackball ───────────────────────────────────────────────────--
       let dragging = false;
@@ -148,7 +156,8 @@
       // ── Anchor ──────────────────────────────────────────────────────────────
       const anchor = mindarThree.addAnchor(0);
       let hintShown = false;
-      let model = null;
+      let model = null;       // the loaded GLB scene (carries the static tilt)
+      let pivot = null;       // parent we spin/drag; null until the GLB loads
 
       anchor.onTargetFound = () => {
         statusEl.style.opacity = '0';
@@ -169,11 +178,11 @@
       const clock = new THREE.Clock();
       renderer.setAnimationLoop(() => {
         const dt = clock.getDelta();
-        if (model) {
+        if (pivot) {
           if (autoActive) autoAngle += AUTO_SPEED * dt;
-          // World-Y auto-spin composed with user trackball
-          _autoQ.setFromAxisAngle(_Y, autoAngle);
-          model.quaternion.copy(_autoQ).multiply(userQuat);
+          // Turntable auto-spin (around card normal) composed with user trackball
+          _autoQ.setFromAxisAngle(_SPIN_AXIS, autoAngle);
+          pivot.quaternion.copy(_autoQ).multiply(userQuat);
         }
         renderer.render(scene, camera);
       });
@@ -196,23 +205,35 @@
 
       statusEl.textContent = 'Point camera at image…';
 
-      // ── Fit and attach model ──────────────────────────────────────────────--
+      // ── Fit, tilt, and attach model ───────────────────────────────────────--
       model = gltf.scene;
       {
-        const box    = new THREE.Box3().setFromObject(model);
-        const size   = new THREE.Vector3();
-        const center = new THREE.Vector3();
-        box.getSize(size);
-        box.getCenter(center);
+        // 1) Scale to ~70% of the image-target width
+        const box0 = new THREE.Box3().setFromObject(model);
+        const size = box0.getSize(new THREE.Vector3());
         const scale = 0.7 / Math.max(size.x, size.y, size.z);
         model.scale.setScalar(scale);
+
+        // 2) Bake the upright tilt into the model (static — never touched again)
+        model.quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), BASE_TILT_X);
+
+        // 3) Re-measure AFTER scale + tilt, then recenter on X/Y and sit the
+        //    model's base on the card plane (z = 0), so the card is the floor.
+        model.updateMatrixWorld(true);
+        const box1   = new THREE.Box3().setFromObject(model);
+        const center = box1.getCenter(new THREE.Vector3());
+        const min    = box1.min;
         model.position.set(
-          -center.x * scale,
-          -center.y * scale + 0.18,   // lift above the image plane
-          -center.z * scale,
+          model.position.x - center.x,   // centre horizontally on the card
+          model.position.y - center.y,
+          model.position.z - min.z,      // base flush with the card surface
         );
       }
-      anchor.group.add(model);
+
+      // Pivot carries the spin + drag; model (with its baked tilt) lives inside.
+      pivot = new THREE.Group();
+      pivot.add(model);
+      anchor.group.add(pivot);
 
       // If target was already found while the GLB was still loading, show hint now
       if (!hintShown && overlay.classList.contains('active')) {
