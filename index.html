@@ -3,25 +3,57 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <title>AR Bridge – MindAR Module Test</title>
+  <title>AR Bridge</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { overflow: hidden; background: #000; }
-    #ar-container { width: 100vw; height: 100vh; }
-    #status {
-      position: fixed; top: 20px; left: 50%;
-      transform: translateX(-50%);
-      color: #fff; font-family: -apple-system, sans-serif; font-size: 15px;
-      background: rgba(0,0,0,0.7); padding: 10px 20px;
-      border-radius: 20px; z-index: 9999; white-space: nowrap;
+
+    #ar-container { width: 100vw; height: 100vh; position: relative; }
+
+    /* Transparent touch surface — only active while the image is tracked */
+    #touch-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      pointer-events: none;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+      cursor: grab;
     }
+    #touch-overlay.active { pointer-events: auto; }
+    #touch-overlay:active { cursor: grabbing; }
+
+    .pill {
+      position: fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      font-weight: 500;
+      background: rgba(0, 0, 0, 0.52);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      padding: 8px 20px;
+      border-radius: 24px;
+      z-index: 200;
+      white-space: nowrap;
+      pointer-events: none;
+      transition: opacity 0.45s ease;
+    }
+
+    #status { top: 28px; }
+    #hint   { bottom: 56px; opacity: 0; }
   </style>
 </head>
 <body>
   <div id="ar-container"></div>
-  <div id="status">Loading modules…</div>
+  <div id="touch-overlay"></div>
+  <div id="status" class="pill">Starting…</div>
+  <div id="hint"   class="pill">Drag to rotate</div>
 
-  <!-- Official MindAR pattern: importmap resolves THREE + mindar-image-three -->
+  <!-- Official MindAR pattern: importmap resolves THREE, addons, and mindar-image-three -->
   <script type="importmap">
   {
     "imports": {
@@ -33,34 +65,165 @@
   </script>
 
   <script type="module">
-    const s = document.getElementById('status');
-    try {
-      const THREE = await import('three');
-      const { MindARThree } = await import('mindar-image-three');
-      s.textContent = 'Modules loaded (THREE r' + THREE.REVISION + ') — starting…';
+    import * as THREE       from 'three';
+    import { GLTFLoader }   from 'three/addons/loaders/GLTFLoader.js';
+    import { DRACOLoader }  from 'three/addons/loaders/DRACOLoader.js';
+    import { MindARThree }  from 'mindar-image-three';
 
+    const container = document.getElementById('ar-container');
+    const overlay   = document.getElementById('touch-overlay');
+    const statusEl  = document.getElementById('status');
+    const hintEl    = document.getElementById('hint');
+
+    try {
+      // ── MindAR ──────────────────────────────────────────────────────────────
       const mindarThree = new MindARThree({
-        container: document.getElementById('ar-container'),
+        container,
         imageTargetSrc: './targets.mind',
       });
       const { renderer, scene, camera } = mindarThree;
 
-      scene.add(new THREE.AmbientLight(0xffffff, 1));
-      const cube = new THREE.Mesh(
-        new THREE.BoxGeometry(0.1, 0.1, 0.1),
-        new THREE.MeshBasicMaterial({ color: 0xff0000 })
-      );
+      // ── Lighting ────────────────────────────────────────────────────────────
+      scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+      const sun = new THREE.DirectionalLight(0xfff4d6, 1.4);
+      sun.position.set(2, 5, 3);
+      scene.add(sun);
+      const fill = new THREE.DirectionalLight(0xd6e8ff, 0.4);
+      fill.position.set(-3, 0, -2);
+      scene.add(fill);
+
+      // ── Rotation state ──────────────────────────────────────────────────────
+      const userQuat    = new THREE.Quaternion();  // cumulative drag rotation
+      let   autoAngle   = 0;                        // world-Y spin accumulator
+      let   autoActive  = true;
+      let   resumeTimer = null;
+
+      const AUTO_SPEED       = 0.5;    // rad / s
+      const RESUME_DELAY_MS  = 2000;   // rest before auto-spin resumes
+      const DRAG_SENSITIVITY = 0.004;  // pointer px → radians
+
+      const _dragAxis  = new THREE.Vector3();
+      const _dragDelta = new THREE.Quaternion();
+      const _autoQ     = new THREE.Quaternion();
+      const _Y         = new THREE.Vector3(0, 1, 0);
+
+      // ── Touch trackball ───────────────────────────────────────────────────--
+      let dragging = false;
+      let prevX = 0, prevY = 0;
+
+      overlay.addEventListener('pointerdown', (e) => {
+        overlay.setPointerCapture(e.pointerId);
+        dragging = true;
+        prevX = e.clientX;
+        prevY = e.clientY;
+        autoActive = false;
+        clearTimeout(resumeTimer);
+        hintEl.style.opacity = '0';
+        e.preventDefault();
+      });
+
+      overlay.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        const dx = e.clientX - prevX;
+        const dy = e.clientY - prevY;
+        prevX = e.clientX;
+        prevY = e.clientY;
+        const mag = Math.hypot(dx, dy);
+        if (mag < 0.5) return;
+        // Axis perpendicular to drag → free-axis trackball feel
+        _dragAxis.set(-dy / mag, dx / mag, 0);
+        _dragDelta.setFromAxisAngle(_dragAxis, mag * DRAG_SENSITIVITY);
+        userQuat.premultiply(_dragDelta);   // apply in world space
+        e.preventDefault();
+      });
+
+      const endDrag = () => {
+        if (!dragging) return;
+        dragging = false;
+        resumeTimer = setTimeout(() => { autoActive = true; }, RESUME_DELAY_MS);
+      };
+      overlay.addEventListener('pointerup',     endDrag);
+      overlay.addEventListener('pointercancel', endDrag);
+
+      // ── Anchor ──────────────────────────────────────────────────────────────
       const anchor = mindarThree.addAnchor(0);
-      anchor.group.add(cube);
-      anchor.onTargetFound = () => { s.textContent = '✓ Image detected!'; };
-      anchor.onTargetLost  = () => { s.textContent = 'Point camera at image…'; };
+      let hintShown = false;
+      let model = null;
 
-      renderer.setAnimationLoop(() => renderer.render(scene, camera));
+      anchor.onTargetFound = () => {
+        statusEl.style.opacity = '0';
+        overlay.classList.add('active');
+        if (model && !hintShown) {
+          hintShown = true;
+          hintEl.style.opacity = '1';
+          setTimeout(() => { hintEl.style.opacity = '0'; }, 2800);
+        }
+      };
+      anchor.onTargetLost = () => {
+        statusEl.textContent = 'Point camera at image…';
+        statusEl.style.opacity = '1';
+        overlay.classList.remove('active');
+      };
 
-      await mindarThree.start();
-      s.textContent = 'Point camera at image…';
+      // ── Animation loop ────────────────────────────────────────────────────--
+      const clock = new THREE.Clock();
+      renderer.setAnimationLoop(() => {
+        const dt = clock.getDelta();
+        if (model) {
+          if (autoActive) autoAngle += AUTO_SPEED * dt;
+          // World-Y auto-spin composed with user trackball
+          _autoQ.setFromAxisAngle(_Y, autoAngle);
+          model.quaternion.copy(_autoQ).multiply(userQuat);
+        }
+        renderer.render(scene, camera);
+      });
+
+      // ── Loaders ───────────────────────────────────────────────────────────--
+      const dracoLoader = new DRACOLoader();
+      dracoLoader.setDecoderPath(
+        'https://cdn.jsdelivr.net/npm/three@0.147.0/examples/jsm/libs/draco/gltf/'
+      );
+      const gltfLoader = new GLTFLoader();
+      gltfLoader.setDRACOLoader(dracoLoader);
+
+      // ── Start camera + load GLB in parallel ───────────────────────────────--
+      const [, gltf] = await Promise.all([
+        mindarThree.start(),
+        new Promise((resolve, reject) =>
+          gltfLoader.load('./highway_bridge_chinese_style.glb', resolve, undefined, reject)
+        ),
+      ]);
+
+      statusEl.textContent = 'Point camera at image…';
+
+      // ── Fit and attach model ──────────────────────────────────────────────--
+      model = gltf.scene;
+      {
+        const box    = new THREE.Box3().setFromObject(model);
+        const size   = new THREE.Vector3();
+        const center = new THREE.Vector3();
+        box.getSize(size);
+        box.getCenter(center);
+        const scale = 0.7 / Math.max(size.x, size.y, size.z);
+        model.scale.setScalar(scale);
+        model.position.set(
+          -center.x * scale,
+          -center.y * scale + 0.18,   // lift above the image plane
+          -center.z * scale,
+        );
+      }
+      anchor.group.add(model);
+
+      // If target was already found while the GLB was still loading, show hint now
+      if (!hintShown && overlay.classList.contains('active')) {
+        hintShown = true;
+        hintEl.style.opacity = '1';
+        setTimeout(() => { hintEl.style.opacity = '0'; }, 2800);
+      }
+
     } catch (err) {
-      s.textContent = 'ERROR: ' + err.message;
+      statusEl.textContent = 'Error: ' + err.message;
+      statusEl.style.opacity = '1';
     }
   </script>
 </body>
