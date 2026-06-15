@@ -3,59 +3,48 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <title>AR Bridge – MindAR Test</title>
+  <title>AR Bridge – MindAR Module Test</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { overflow: hidden; background: #000; }
     #ar-container { width: 100vw; height: 100vh; }
     #status {
-      position: fixed;
-      top: 20px;
-      left: 50%;
+      position: fixed; top: 20px; left: 50%;
       transform: translateX(-50%);
-      color: #fff;
-      font-family: -apple-system, sans-serif;
-      font-size: 15px;
-      background: rgba(0,0,0,0.7);
-      padding: 10px 20px;
-      border-radius: 20px;
-      z-index: 9999;
-      white-space: nowrap;
+      color: #fff; font-family: -apple-system, sans-serif; font-size: 15px;
+      background: rgba(0,0,0,0.7); padding: 10px 20px;
+      border-radius: 20px; z-index: 9999; white-space: nowrap;
     }
   </style>
 </head>
 <body>
   <div id="ar-container"></div>
-  <div id="status">Loading MindAR script…</div>
+  <div id="status">Loading modules…</div>
 
-  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
-          onload="document.getElementById('status').textContent='MindAR script loaded'"
-          onerror="document.getElementById('status').textContent='FAILED to load MindAR script'">
+  <!-- Official MindAR pattern: importmap resolves THREE + mindar-image-three -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.147.0/examples/jsm/",
+      "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+    }
+  }
   </script>
 
-  <script>
+  <script type="module">
     const s = document.getElementById('status');
+    try {
+      const THREE = await import('three');
+      const { MindARThree } = await import('mindar-image-three');
+      s.textContent = 'Modules loaded (THREE r' + THREE.REVISION + ') — starting…';
 
-    (async function () {
-      s.textContent = 'Step 1 – checking window.THREE…';
-      const THREE = window.THREE;
-      if (!THREE) { s.textContent = 'ERROR: window.THREE is undefined'; return; }
-      s.textContent = 'Step 2 – THREE OK, checking MINDAR…';
-
-      if (!window.MINDAR || !window.MINDAR.IMAGE) {
-        s.textContent = 'ERROR: window.MINDAR.IMAGE is undefined'; return;
-      }
-      s.textContent = 'Step 3 – MINDAR OK, creating MindARThree…';
-
-      const { MindARThree } = window.MINDAR.IMAGE;
       const mindarThree = new MindARThree({
         container: document.getElementById('ar-container'),
         imageTargetSrc: './targets.mind',
       });
       const { renderer, scene, camera } = mindarThree;
-      s.textContent = 'Step 4 – MindARThree created, adding cube…';
 
-      // Minimal scene: red cube on the image target
       scene.add(new THREE.AmbientLight(0xffffff, 1));
       const cube = new THREE.Mesh(
         new THREE.BoxGeometry(0.1, 0.1, 0.1),
@@ -68,13 +57,11 @@
 
       renderer.setAnimationLoop(() => renderer.render(scene, camera));
 
-      s.textContent = 'Step 5 – calling mindarThree.start()…';
       await mindarThree.start();
       s.textContent = 'Point camera at image…';
-
-    })().catch((err) => {
+    } catch (err) {
       s.textContent = 'ERROR: ' + err.message;
-    });
+    }
   </script>
 </body>
 </html>
